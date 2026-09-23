@@ -8,7 +8,7 @@
   :root {
     color-scheme: light;
     --bg: #f4f3f1;
-    --panel: #f9f8f6;
+    --panel: #f4f3f1;
     --border: #e6e4e0;
     --text: #6b6963;
     --muted: #a5a29a;
@@ -119,8 +119,8 @@
   function buildPanel(chartEl, legendEl, seriesDefs) {
     var chart = LightweightCharts.createChart(chartEl, {
       autoSize: true,
-      layout: { background: { color: 'transparent' }, textColor: '#a5a29a', fontFamily: 'inherit', fontSize: 11 },
-      grid: { vertLines: { color: '#ece9e4' }, horzLines: { color: '#ece9e4' } },
+      layout: { background: { color: '#f4f3f1' }, textColor: '#a5a29a', fontFamily: 'inherit', fontSize: 11 },
+      grid: { vertLines: { visible: false }, horzLines: { visible: false } },
       rightPriceScale: { borderVisible: false },
       timeScale: { borderVisible: false, timeVisible: false, fixLeftEdge: true, fixRightEdge: true },
       crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
