@@ -5,11 +5,17 @@ Refreshes the dataset embedded in markets.html from Yahoo Finance.
 Stdlib-only (urllib/json), so it runs anywhere with no pip install -
 a local machine, a cron box, or a GitHub Actions runner.
 
+A series that can't be fetched keeps its previous data and is listed under
+"pending" in the dataset, for a later --retry-pending run to pick up.
+
 Usage:
-    python3 update_data.py
+    python3 update_data.py                  # refresh everything
+    python3 update_data.py --retry-pending  # refresh only what's pending
 """
 
+import argparse
 import datetime
+import functools
 import json
 import re
 import sys
@@ -26,6 +32,11 @@ USER_AGENT = (
 )
 CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?range=1mo&interval=1d"
 OUNCE_TO_GRAM = 31.1034768
+REQUEST_GAP_SECONDS = 2
+RATE_LIMIT_WAIT_SECONDS = 120
+APP_DATA_RE = re.compile(
+    r'(<script id="app-data" type="application/json">)(.*?)(</script>)', re.S
+)
 
 # The watchlist. Edit this to add/remove/regroup what the page tracks -
 # the next run picks up the change automatically.
@@ -61,13 +72,26 @@ def fetch_chart(symbol, retries=3):
     url = CHART_URL.format(symbol=urllib.parse.quote(symbol, safe=""))
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     last_err = None
-    for attempt in range(retries):
+    rate_limit_retried = False
+    attempt = 0
+    while attempt < retries:
+        time.sleep(REQUEST_GAP_SECONDS)
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 return json.load(resp)
-        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        except urllib.error.HTTPError as e:
             last_err = e
-            time.sleep(2 * (attempt + 1))
+            if e.code == 429:
+                if rate_limit_retried:
+                    break
+                rate_limit_retried = True
+                print(f"Rate limited on {symbol}, retrying in {RATE_LIMIT_WAIT_SECONDS}s...", file=sys.stderr)
+                time.sleep(RATE_LIMIT_WAIT_SECONDS)
+                continue
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+        attempt += 1
+        time.sleep(2 * attempt)
     raise RuntimeError(f"failed to fetch {symbol}: {last_err}")
 
 
@@ -103,50 +127,83 @@ def fetch_series_entry(label, symbol, link=None):
     return {"label": label, "dates": dates, "values": values, "link": link or yahoo_quote_link(symbol)}
 
 
-def build_dataset():
+@functools.lru_cache(maxsize=1)
+def fetch_usdinr():
+    return series(fetch_chart(USDINR_SYMBOL))
+
+
+def fetch_commodity_entry(label, symbol):
+    dates, usd_oz = series(fetch_chart(symbol))
+    fx_dates, fx_values = fetch_usdinr()
+    fx = align(dates, fx_dates, fx_values)
+    inr_gram = [round(v * r / OUNCE_TO_GRAM, 2) for v, r in zip(usd_oz, fx)]
+    return {"label": label, "dates": dates, "values": inr_gram, "link": yahoo_quote_link(symbol)}
+
+
+def build_dataset(previous, only=None):
+    """Fetch the watchlist, falling back to `previous` for failed series.
+
+    If `only` is given, just those labels (and any new to the watchlist) are
+    fetched; everything else is carried over from `previous`.
+    """
+    previous_entries = {
+        e["label"]: e
+        for entries in [previous["indices"], previous["commodities"], *previous["stocks"].values()]
+        for e in entries
+    }
+    failed = []
+    refreshed = []
+
+    def collect(pairs):
+        entries = []
+        for label, fetch in pairs:
+            if only is not None and label not in only and label in previous_entries:
+                entries.append(previous_entries[label])
+                continue
+            try:
+                entries.append(fetch())
+                refreshed.append(label)
+            except RuntimeError as e:
+                print(f"Keeping old data for {label}: {e}", file=sys.stderr)
+                failed.append(label)
+                if label in previous_entries:
+                    entries.append(previous_entries[label])
+        return entries
+
     print("Fetching indices...", file=sys.stderr)
-    indices = []
-    for label, symbol in INDICES:
-        indices.append(fetch_series_entry(label, symbol))
-        time.sleep(1.5)
+    indices = collect(
+        (label, functools.partial(fetch_series_entry, label, symbol)) for label, symbol in INDICES
+    )
 
     print("Fetching gold/silver/FX...", file=sys.stderr)
-    gold_payload = fetch_chart(GOLD_SYMBOL)
-    time.sleep(1.5)
-    silver_payload = fetch_chart(SILVER_SYMBOL)
-    time.sleep(1.5)
-    fx_payload = fetch_chart(USDINR_SYMBOL)
-
-    gold_dates, gold_usd_oz = series(gold_payload)
-    silver_dates, silver_usd_oz = series(silver_payload)
-    fx_dates, fx_values = series(fx_payload)
-
-    gold_fx = align(gold_dates, fx_dates, fx_values)
-    silver_fx = align(silver_dates, fx_dates, fx_values)
-    gold_inr_gram = [round(v * r / OUNCE_TO_GRAM, 2) for v, r in zip(gold_usd_oz, gold_fx)]
-    silver_inr_gram = [round(v * r / OUNCE_TO_GRAM, 2) for v, r in zip(silver_usd_oz, silver_fx)]
-
-    commodities = [
-        {"label": "Gold (INR/gram)", "dates": gold_dates, "values": gold_inr_gram, "link": yahoo_quote_link(GOLD_SYMBOL)},
-        {"label": "Silver (INR/gram)", "dates": silver_dates, "values": silver_inr_gram, "link": yahoo_quote_link(SILVER_SYMBOL)},
-    ]
+    commodities = collect(
+        (label, functools.partial(fetch_commodity_entry, label, symbol))
+        for label, symbol in [("Gold (INR/gram)", GOLD_SYMBOL), ("Silver (INR/gram)", SILVER_SYMBOL)]
+    )
 
     print("Fetching stocks by group...", file=sys.stderr)
     stocks = {}
     for group, symbols, suffix in STOCK_GROUPS:
-        entries = []
-        for sym in symbols:
-            full_symbol = sym + suffix
-            entries.append(fetch_series_entry(sym, full_symbol))
-            time.sleep(1.5)
-        stocks[group] = entries
+        stocks[group] = collect(
+            (sym, functools.partial(fetch_series_entry, sym, sym + suffix)) for sym in symbols
+        )
 
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
-        "generatedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generatedAt": now if refreshed else previous["generatedAt"],
+        "pending": failed,
         "indices": indices,
         "commodities": commodities,
         "stocks": stocks,
     }
+
+
+def load_dataset(html_path=HTML_PATH):
+    with open(html_path, "r", encoding="utf-8") as f:
+        match = APP_DATA_RE.search(f.read())
+    if not match:
+        raise RuntimeError(f"no app-data script tag found in {html_path}")
+    return json.loads(match.group(2))
 
 
 def update_html(dataset, html_path=HTML_PATH):
@@ -154,11 +211,8 @@ def update_html(dataset, html_path=HTML_PATH):
         content = f.read()
 
     new_json = json.dumps(dataset, separators=(",", ":"))
-    pattern = re.compile(
-        r'(<script id="app-data" type="application/json">).*?(</script>)', re.S
-    )
-    new_content, n = pattern.subn(
-        lambda m: m.group(1) + new_json + m.group(2), content
+    new_content, n = APP_DATA_RE.subn(
+        lambda m: m.group(1) + new_json + m.group(3), content
     )
     if n != 1:
         raise RuntimeError(f"expected exactly 1 app-data script tag, found {n}")
@@ -168,9 +222,26 @@ def update_html(dataset, html_path=HTML_PATH):
 
 
 def main():
-    dataset = build_dataset()
+    parser = argparse.ArgumentParser(description="Refresh the dataset embedded in markets.html.")
+    parser.add_argument("--retry-pending", action="store_true", help="only fetch series a previous run couldn't")
+    args = parser.parse_args()
+
+    previous = load_dataset()
+    only = None
+    if args.retry_pending:
+        only = set(previous.get("pending", []))
+        if not only:
+            print("Nothing pending.", file=sys.stderr)
+            return
+
+    dataset = build_dataset(previous, only)
     update_html(dataset)
     print(f"Updated {HTML_PATH} (generatedAt {dataset['generatedAt']})", file=sys.stderr)
+
+    if dataset["pending"]:
+        print(f"Still pending: {', '.join(dataset['pending'])}", file=sys.stderr)
+        if args.retry_pending:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
