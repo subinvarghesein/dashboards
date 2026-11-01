@@ -11,6 +11,7 @@ A series that can't be fetched keeps its previous data and is listed under
 Usage:
     python3 update_data.py                  # refresh everything
     python3 update_data.py --retry-pending  # refresh only what's pending
+    python3 update_data.py --push           # also commit markets.html and push
 """
 
 import argparse
@@ -18,6 +19,7 @@ import datetime
 import functools
 import json
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -140,6 +142,11 @@ def fetch_commodity_entry(label, symbol):
     return {"label": label, "dates": dates, "values": inr_gram, "link": yahoo_quote_link(symbol)}
 
 
+def fetch_currency_entry(label):
+    dates, values = fetch_usdinr()
+    return {"label": label, "dates": dates, "values": values, "link": yahoo_quote_link(USDINR_SYMBOL)}
+
+
 def build_dataset(previous, only=None):
     """Fetch the watchlist, falling back to `previous` for failed series.
 
@@ -148,7 +155,7 @@ def build_dataset(previous, only=None):
     """
     previous_entries = {
         e["label"]: e
-        for entries in [previous["indices"], previous["commodities"], *previous["stocks"].values()]
+        for entries in [previous["indices"], previous["commodities"], previous.get("currency", []), *previous["stocks"].values()]
         for e in entries
     }
     failed = []
@@ -181,6 +188,8 @@ def build_dataset(previous, only=None):
         for label, symbol in [("Gold (INR/gram)", GOLD_SYMBOL), ("Silver (INR/gram)", SILVER_SYMBOL)]
     )
 
+    currency = collect([("USD/INR", functools.partial(fetch_currency_entry, "USD/INR"))])
+
     print("Fetching stocks by group...", file=sys.stderr)
     stocks = {}
     for group, symbols, suffix in STOCK_GROUPS:
@@ -194,6 +203,7 @@ def build_dataset(previous, only=None):
         "pending": failed,
         "indices": indices,
         "commodities": commodities,
+        "currency": currency,
         "stocks": stocks,
     }
 
@@ -221,9 +231,17 @@ def update_html(dataset, html_path=HTML_PATH):
         f.write(new_content)
 
 
+def publish(html_path=HTML_PATH):
+    """Commit html_path if it changed, then push. Also sends any commit an earlier failed push left behind."""
+    if subprocess.run(["git", "diff", "--quiet", "HEAD", "--", html_path]).returncode != 0:
+        subprocess.run(["git", "commit", "-m", "Update market data", "--", html_path], check=True)
+    subprocess.run(["git", "push", "origin", "HEAD"], check=True, timeout=120)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Refresh the dataset embedded in markets.html.")
     parser.add_argument("--retry-pending", action="store_true", help="only fetch series a previous run couldn't")
+    parser.add_argument("--push", action="store_true", help="commit markets.html and push it to the remote")
     args = parser.parse_args()
 
     previous = load_dataset()
@@ -232,11 +250,15 @@ def main():
         only = set(previous.get("pending", []))
         if not only:
             print("Nothing pending.", file=sys.stderr)
+            if args.push:
+                publish()
             return
 
     dataset = build_dataset(previous, only)
     update_html(dataset)
     print(f"Updated {HTML_PATH} (generatedAt {dataset['generatedAt']})", file=sys.stderr)
+    if args.push:
+        publish()
 
     if dataset["pending"]:
         print(f"Still pending: {', '.join(dataset['pending'])}", file=sys.stderr)
