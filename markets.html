@@ -114,33 +114,44 @@
 (function () {
   var DATA = JSON.parse(document.getElementById('app-data').textContent);
 
-  // Fixed per-symbol colors so a symbol keeps its color across page updates,
+  // One shared 10-color set for every chart. Every pair is distinct to normal
+  // vision; slots 1-6 also stay apart under red-green colorblindness, so charts
+  // with up to six lines use those first.
+  var PALETTE = [
+    '#1f6fd1', // 1 blue
+    '#be0032', // 2 red
+    '#00897b', // 3 teal
+    '#f6a600', // 4 amber
+    '#e377c2', // 5 pink
+    '#5b2a86', // 6 purple
+    '#3fb6e8', // 7 sky
+    '#7cb518', // 8 lime
+    '#a6761d', // 9 ochre
+    '#654522'  // 10 dark brown
+  ];
+
+  // Fixed per-symbol slots so a symbol keeps its color across page updates,
   // regardless of list order or what else is added/removed.
-  var COLOR_MAP = {
-    // Indices: India is the reference line, everything else pushed lighter/greyer so it recedes
-    'NSE (Nifty 50)': '#5b7ea3',
-    'New York (Dow)': '#d8c3a5', 'Nasdaq': '#c9b28f',
-    'Nikkei 225': '#d9b8b8',
-    'Shanghai': '#b9cdb9',
-    'London (FTSE)': '#c7c9d1',
+  var COLOR_SLOT = {
+    // Indices: Nifty keeps blue as the reference line
+    'NSE (Nifty 50)': 0, 'New York (Dow)': 1, 'Nasdaq': 2, 'Nikkei 225': 3, 'Shanghai': 4, 'London (FTSE)': 5,
     // Commodities
-    'Gold (INR/gram)': '#c7ab5e', 'Silver (INR/gram)': '#9a9890',
+    'Gold (INR/gram)': 3, 'Silver (INR/gram)': 0,
     // Currency
-    'USD/INR': '#7fa3a1',
+    'USD/INR': 0,
     // NSE sector stocks
-    'HDFCBANK': '#8fa3b8', 'ICICIBANK': '#b58b83', 'IDFCFIRSTB': '#85a084', 'JIOFIN': '#c2a26a',
-    'LT': '#8fa3b8', 'RELIANCE': '#b58b83',
-    'TITAN': '#8fa3b8', 'DMART': '#b58b83',
-    'INDIGO': '#8fa3b8',
+    'HDFCBANK': 0, 'ICICIBANK': 1, 'IDFCFIRSTB': 2, 'JIOFIN': 3,
+    'LT': 0, 'RELIANCE': 1,
+    'TITAN': 0, 'DMART': 1,
+    'INDIGO': 0,
     // US stocks
-    'WMT': '#c17b73', 'NVDA': '#c3d3c3', 'GOOGL': '#c9d5e0', 'AAPL': '#cac8c2', 'MSFT': '#d8cfe3'
+    'WMT': 0, 'NVDA': 1, 'GOOGL': 2, 'AAPL': 3, 'MSFT': 4
   };
-  var FALLBACK_PALETTE = ['#8fa3b8', '#b58b83', '#85a084', '#c2a26a', '#9c8fae', '#7fa3a1', '#b58ba0', '#9ba36e'];
   function colorForLabel(label) {
-    if (COLOR_MAP[label]) return COLOR_MAP[label];
+    if (label in COLOR_SLOT) return PALETTE[COLOR_SLOT[label]];
     var hash = 0;
     for (var i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) >>> 0;
-    return FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
+    return PALETTE[hash % PALETTE.length];
   }
 
   function formatReal(v) {
